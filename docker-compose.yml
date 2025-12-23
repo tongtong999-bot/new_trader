@@ -2,7 +2,7 @@ services:
   bot:
     build:
       context: .
-    container_name: my_trading_system_bot
+    container_name: my_trading_system_bot2
     restart: unless-stopped
     environment:
       # 交易所配置
@@ -39,7 +39,7 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       
       # Optional timezone
-      TZ: ${TZ:-UTC}
+      TZ: Asia/Shanghai
       
       # PushPlus notification (optional)
       PUSHPLUS_WEBHOOK: ${PUSHPLUS_WEBHOOK:-}
@@ -51,4 +51,4 @@ services:
     # Default command: single symbol bot (默认非交互模式)
     command: ["python", "-u", "live_trading_v52.py"]
     # For multi-symbol mode, uncomment:
-    # command: ["python", "-u", "multi_symbol_trading.py"]
+    command: ["python", "-u", "multi_symbol_trading.py"]
