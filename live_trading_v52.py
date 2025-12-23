@@ -31,6 +31,7 @@ import sys
 import logging
 import argparse
 import requests
+import math
 from pathlib import Path
 import pickle
 import json
@@ -1212,21 +1213,52 @@ class LiveTradingBotV52:
                     params = {}
                     if self.config.use_swap:
                         params['tdMode'] = 'isolated'  # 逐仓模式
-                        # 如果配置了杠杆倍数，先设置杠杆（OKX需要在开仓前设置）
-                        if self.config.leverage is not None:
+                        # 仅 OKX 走设置杠杆，避免在 Binance 等交易所调用不存在的 API
+                        if self.config.exchange_id == 'okx' and self.config.leverage is not None:
                             try:
-                                # OKX 设置杠杆的 API
                                 market_info = self.exchange.market(self.config.symbol)
                                 okx_id = market_info.get('id', '')
                                 if okx_id:
                                     self.exchange.private_post_account_set_leverage({
                                         'instId': okx_id,
                                         'lever': str(self.config.leverage),
-                                        'mgnMode': 'isolated'  # 逐仓模式
+                                        'mgnMode': 'isolated'
                                     })
                                     logger.info(f"已设置杠杆: {self.config.leverage}x")
                             except Exception as e:
                                 logger.warning(f"设置杠杆失败: {e}，将使用账户默认杠杆")
+
+                    # 校验最小名义金额与数量步长，避免交易所报 notional 过小
+                    try:
+                        market_info = self.exchange.market(self.config.symbol)
+                        limits = market_info.get('limits') or {}
+                        min_cost = (limits.get('cost') or {}).get('min')
+                        # Binance 某些市场的 min_cost 可能为空，尝试从 filters 读取 MIN_NOTIONAL/notional
+                        if not min_cost:
+                            filters = (market_info.get('info') or {}).get('filters') or []
+                            for f in filters:
+                                if f.get('filterType') == 'MIN_NOTIONAL':
+                                    val = f.get('notional') or f.get('minNotional')
+                                    if val:
+                                        min_cost = float(val)
+                                        break
+                        amount_min = (limits.get('amount') or {}).get('min')
+                        amount_step = (limits.get('amount') or {}).get('step')
+
+                        if min_cost:
+                            notional = contract_size * current_price
+                            if notional < min_cost:
+                                scale = min_cost / notional
+                                contract_size *= scale
+                                logger.info(f"下单金额低于最小名义金额 {min_cost}, 已将合约数量调整为 {contract_size:.6f}")
+                        if amount_min and contract_size < amount_min:
+                            contract_size = amount_min
+                            logger.info(f"下单数量低于最小数量 {amount_min}, 已调整为最小值")
+                        if amount_step:
+                            # 向上取整到步长倍数，避免因精度不足被拒单
+                            contract_size = math.ceil(contract_size / amount_step) * amount_step
+                    except Exception as e:
+                        logger.warning(f"校验最小名义金额失败: {e}")
                     
                     # 【v5.3】网格策略：使用网格信号中的价格（限价单）或市价单
                     if signal.get('trade_type') == 'grid':
