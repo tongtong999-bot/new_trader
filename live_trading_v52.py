@@ -764,7 +764,7 @@ class LiveTradingBotV52:
                             else:
                                 break
                         
-                        time_module.sleep(0.2)  # 避免请求过快
+                        time.sleep(0.2)  # 避免请求过快
                     except Exception as e:
                         logger.warning(f"批次 {batch+1} 获取失败: {e}")
                         # 如果已经获取了足够的数据，继续使用
