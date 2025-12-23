@@ -169,12 +169,12 @@ class StrategyConfig:
     DISABLE_BOX_TRADING: bool = True
     
     # 【v5.3新增】网格策略参数
-    ENABLE_GRID_TRADING: bool = True  # 启用网格策略（震荡区间）
-    GRID_MIN_INTERVAL_PCT: float = 2.0  # 【优化】网格最小间隔（2%，从1%提升）
+    ENABLE_GRID_TRADING: bool = True  # 启用网格，但弱化风险/频次
+    GRID_MIN_INTERVAL_PCT: float = 4.0  # 更大间隔，降低频率
     GRID_MIN_BOX_RANGE_PCT: float = 5.0  # 箱体最小区间（5%）
-    GRID_MAX_LAYERS: int = 10  # 最大网格层数
-    GRID_RISK_PER_LAYER: float = 0.5  # 每层网格风险（账户的0.5%）
-    GRID_MAX_POSITION_PCT: float = 60.0  # 网格最大仓位限制（60%）
+    GRID_MAX_LAYERS: int = 8  # 限制层数
+    GRID_RISK_PER_LAYER: float = 1.5  # 单层风险 1.5%
+    GRID_MAX_POSITION_PCT: float = 90.0  # 总网格风险不超90%
     GRID_SL_MULTIPLIER: float = 1.5  # 【优化】网格止损倍数（1.5倍间隔，从1倍提升）
     
     SCORE_WEIGHT_TREND_DIRECTION: int = 25
@@ -184,10 +184,12 @@ class StrategyConfig:
     SCORE_WEIGHT_REVERSAL_CANDLE: int = 10
     SCORE_WEIGHT_VOLATILITY: int = 10
     
-    RISK_PER_TRADE: float = 3.0  # 提高风险 2% → 3%（实盘/模拟用）
+    RISK_PER_TRADE: float = 15.0  # 趋势单风险 15%
+    LONG_RISK_MULTIPLIER: float = 1.0  # 多头风险系数
+    SHORT_RISK_MULTIPLIER: float = 1.3  # 空头风险系数（适度更激进）
     
     # 止损：2倍ATR
-    STOP_LOSS_ATR_MULTIPLIER: float = 2.0
+    STOP_LOSS_ATR_MULTIPLIER: float = 2.5
     TRAILING_STOP_ACTIVATION: float = 2.0
     TRAILING_STOP_DISTANCE: float = 1.5  # v5.2: 放宽移动止损 1.0 → 1.5
     
@@ -198,7 +200,7 @@ class StrategyConfig:
     ADD_POSITION_THRESHOLD: float = 999.0  # 禁用加仓
     
     # 分批止盈参数
-    PARTIAL_TP_R_MULTIPLE: float = 2.0
+    PARTIAL_TP_R_MULTIPLE: float = 2.5
     PARTIAL_TP_RATIO: float = 0.3  # v5.2: 部分止盈只平30%，保留更多仓位
     FULL_TP_R_MULTIPLE: float = 5.0  # v5.2: 延长持仓 3R → 5R
     
@@ -211,10 +213,10 @@ class StrategyConfig:
     # 无时间止损
     MAX_HOLDING_BARS: int = 99999
     
-    # 币种层级仓位限制 v5.2: 统一为30%
-    TIER1_MAX_POSITION: float = 42.0  # 提升仓位上限 30% → 42%
-    TIER2_MAX_POSITION: float = 42.0
-    TIER3_MAX_POSITION: float = 42.0
+    # 币种层级仓位限制：统一为90%
+    TIER1_MAX_POSITION: float = 90.0
+    TIER2_MAX_POSITION: float = 90.0
+    TIER3_MAX_POSITION: float = 90.0
     
     TRADING_FEE: float = 0.0004
     MIN_DATA_BARS: int = 200
@@ -654,39 +656,69 @@ class GridStrategyGenerator:
         if box_high is None or box_low is None:
             return None
         
-        # 检查箱体区间是否>=5%
+        # 检查箱体区间是否>=最小要求
+        if box_low <= 0:
+            return None
         box_range_pct = (box_high - box_low) / box_low * 100
         if box_range_pct < self.cfg.GRID_MIN_BOX_RANGE_PCT:
             return None  # 箱体太小，不适合网格
         
-        # 检查当前价格是否在箱体内
-        if current_price < box_low or current_price > box_high:
-            return None  # 价格不在箱体内
-        
-        # 根据大趋势决定网格方向
+        # 根据大趋势决定网格方向和交易区间
+        # 定义箱体内相对位置 [0,1]
+        box_range = box_high - box_low
+        if box_range <= 0:
+            return None
+        # 默认整个箱体
+        zone_low = box_low
+        zone_high = box_high
+
         if big_trend == BigTrend.BULLISH:
-            # 牛市：只做多网格（低买高卖）
+            # 牛市：只做多网格，区间为箱体底部0~0.8
             grid_side = SignalType.LONG
+            zone_low = box_low
+            zone_high = box_low + box_range * 0.8
         elif big_trend == BigTrend.BEARISH:
-            # 熊市：只做空网格（高卖低买）
+            # 熊市：只做空网格，区间为箱体底部0.2~顶部1
             grid_side = SignalType.SHORT
+            zone_low = box_low + box_range * 0.2
+            zone_high = box_high
         else:
-            # 中性：不交易（或可以双向，但这里保守处理）
+            # 中性：不交易
+            return None
+
+        # 检查当前价格是否在对应交易区间内
+        if current_price < zone_low or current_price > zone_high:
             return None
         
-        # 动态计算网格间隔
-        # 目标：网格间隔>=1%，但不要太大（避免层数太少）
-        min_interval_price = current_price * self.cfg.GRID_MIN_INTERVAL_PCT / 100
-        # 也可以基于ATR：间隔 = max(1%价格, 0.5倍ATR)
-        atr_interval = atr * 0.5
-        grid_interval = max(min_interval_price, atr_interval)
-        
-        # 计算网格层数（在箱体内）
-        available_range = box_high - box_low
-        max_layers = min(
-            int(available_range / grid_interval),
-            self.cfg.GRID_MAX_LAYERS
-        )
+        # 动态计算网格间隔（改为百分比驱动，避免币价差异导致 size 跳变）
+        available_range = zone_high - zone_low
+        if current_price <= 0:
+            return None
+        box_range_pct = (available_range / current_price) * 100
+
+        # 方法1：按最大层数均分得到的间隔百分比
+        interval_by_max_layers_pct = box_range_pct / self.cfg.GRID_MAX_LAYERS
+        # 方法2：配置的最小网格间隔百分比
+        min_interval_from_box_pct = self.cfg.GRID_MIN_INTERVAL_PCT
+        # 方法3：ATR 折算的百分比（0.5*ATR 相对当前价）
+        atr_interval_pct = (atr * 0.5 / current_price) * 100 if current_price > 0 else 0
+
+        # 取“不要太小”的百分比
+        min_interval_pct = max(min_interval_from_box_pct, atr_interval_pct)
+
+        # 最大合理间隔百分比：箱体高度的一半百分比（保证至少能分成两层）
+        max_reasonable_interval_pct = box_range_pct / 2
+
+        # 如果最小要求已经大于一半箱体，视为箱体太小
+        if min_interval_pct > max_reasonable_interval_pct:
+            return None
+
+        # 最终网格间隔百分比：在“按层数均分”和“最小要求”里取大的，但不超过一半箱体
+        grid_interval_pct = min(max(interval_by_max_layers_pct, min_interval_pct), max_reasonable_interval_pct)
+        grid_interval = current_price * grid_interval_pct / 100  # 折算为价格间隔
+
+        # 计算网格层数（在箱体内，至少2层）
+        max_layers = min(int(available_range / grid_interval), self.cfg.GRID_MAX_LAYERS)
         
         if max_layers < 2:
             return None  # 层数太少，不适合网格
@@ -696,30 +728,36 @@ class GridStrategyGenerator:
         total_risk = 0
         
         if grid_side == SignalType.LONG:
-            # 做多网格：从箱体下沿向上
-            base_price = box_low
+            # 做多网格：从交易区间下沿向上
+            base_price = zone_low
             for i in range(max_layers):
                 layer_price = base_price + i * grid_interval
                 
-                # 确保在箱体内
-                if layer_price > box_high:
+                # 确保在交易区间内
+                if layer_price > zone_high:
                     break
-                if layer_price < box_low:
+                if layer_price < zone_low:
                     continue
                 
                 # 计算止盈价（上一层或箱体上沿）
                 if i < max_layers - 1:
-                    tp_price = min(layer_price + grid_interval, box_high)
+                    tp_price = min(layer_price + grid_interval, zone_high)
                 else:
-                    tp_price = box_high  # 最后一层止盈在箱体上沿
+                    tp_price = zone_high  # 最后一层止盈在交易区间上沿
                 
-                # 确保止盈在箱体内
-                tp_price = min(tp_price, box_high)
+                # 确保止盈在交易区间内
+                tp_price = min(tp_price, zone_high)
                 
-                # 计算仓位（每层风险 = GRID_RISK_PER_LAYER%）
-                layer_risk = grid_balance * self.cfg.GRID_RISK_PER_LAYER / 100  # 【修复】使用grid_balance而不是balance
-                # 【优化】止损距离 = 网格间隔 × 止损倍数（1.5倍，给价格更多波动空间）
-                sl_distance = grid_interval * self.cfg.GRID_SL_MULTIPLIER
+                # 计算仓位（每层风险 = GRID_RISK_PER_LAYER%，按方向加权，止损距离按百分比）
+                layer_risk = grid_balance * self.cfg.GRID_RISK_PER_LAYER / 100
+                if grid_side == SignalType.SHORT:
+                    layer_risk *= self.cfg.SHORT_RISK_MULTIPLIER
+                else:
+                    layer_risk *= self.cfg.LONG_RISK_MULTIPLIER
+                sl_pct = grid_interval_pct * self.cfg.GRID_SL_MULTIPLIER
+                sl_distance = layer_price * sl_pct / 100
+                if sl_distance <= 0:
+                    continue
                 layer_size = layer_risk / sl_distance
                 
                 grid_layers.append({
@@ -733,33 +771,36 @@ class GridStrategyGenerator:
                 total_risk += layer_risk
         
         else:  # SHORT
-            # 做空网格：从箱体上沿向下
-            base_price = box_high
+            # 做空网格：从交易区间上沿向下
+            base_price = zone_high
             for i in range(max_layers):
                 layer_price = base_price - i * grid_interval
                 
-                # 确保在箱体内
-                if layer_price < box_low:
+                # 确保在交易区间内
+                if layer_price < zone_low:
                     break
-                if layer_price > box_high:
+                if layer_price > zone_high:
                     continue
                 
                 # 计算止盈价（下一层或箱体下沿）
                 if i < max_layers - 1:
-                    tp_price = max(layer_price - grid_interval, box_low)
+                    tp_price = max(layer_price - grid_interval, zone_low)
                 else:
-                    tp_price = box_low  # 最后一层止盈在箱体下沿
+                    tp_price = zone_low  # 最后一层止盈在交易区间下沿
                 
-                # 确保止盈在箱体内
-                tp_price = max(tp_price, box_low)
+                # 确保止盈在交易区间内
+                tp_price = max(tp_price, zone_low)
                 
-                # 计算仓位（每层风险 = GRID_RISK_PER_LAYER%）
-                layer_risk = grid_balance * self.cfg.GRID_RISK_PER_LAYER / 100  # 【修复】使用grid_balance而不是balance
-                # 【优化】止损距离 = 网格间隔 × 止损倍数（1.5倍，给价格更多波动空间）
-                sl_distance = grid_interval * self.cfg.GRID_SL_MULTIPLIER
-                # 确保止损距离不为0
+                # 计算仓位（每层风险 = GRID_RISK_PER_LAYER%，按方向加权，止损距离按百分比）
+                layer_risk = grid_balance * self.cfg.GRID_RISK_PER_LAYER / 100
+                if grid_side == SignalType.SHORT:
+                    layer_risk *= self.cfg.SHORT_RISK_MULTIPLIER
+                else:
+                    layer_risk *= self.cfg.LONG_RISK_MULTIPLIER
+                sl_pct = grid_interval_pct * self.cfg.GRID_SL_MULTIPLIER
+                sl_distance = layer_price * sl_pct / 100
                 if sl_distance <= 0:
-                    sl_distance = layer_price * 0.02  # 至少2%（对应新的最小间隔）
+                    continue
                 layer_size = layer_risk / sl_distance
                 
                 grid_layers.append({
@@ -958,8 +999,12 @@ class RiskManager:
         self.cfg = config
         self.metrics = RiskMetrics()
     
-    def calc_size(self, balance: float, entry: float, sl: float, tier: CoinTier) -> float:
+    def calc_size(self, balance: float, entry: float, sl: float, tier: CoinTier, side: SignalType = None) -> float:
         risk = balance * self.cfg.RISK_PER_TRADE / 100
+        if side == SignalType.SHORT:
+            risk *= self.cfg.SHORT_RISK_MULTIPLIER
+        elif side == SignalType.LONG:
+            risk *= self.cfg.LONG_RISK_MULTIPLIER
         sl_pct = abs(entry - sl) / entry
         if sl_pct == 0:
             return 0
@@ -1398,12 +1443,12 @@ class BacktestEngine:
         
         self._precalc(ltf, mtf, htf)
         
-        # 【v5.3修复】分离资金池：网格和趋势各自1万
-        trend_balance = init_bal  # 趋势交易资金池
-        grid_balance = init_bal   # 网格交易资金池
-        # 【复利模式】如果启用复利，不限制资金增长；否则限制在初始资金
-        grid_balance_max = float('inf') if use_compound else init_bal
-        balance = trend_balance + grid_balance  # 【修复】总余额应该是趋势+网格（2万）
+        # 【调整】分离资金池：总本金=init_bal，趋势/网格各一半
+        trend_balance = init_bal * 0.5  # 趋势交易资金池
+        grid_balance = init_bal * 0.5   # 网格交易资金池
+        # 【复利模式】网格资金允许随收益无限增长（按风险百分比控制），不再限制上限
+        grid_balance_max = float('inf')
+        balance = trend_balance + grid_balance
         
         pending = None
         pending_type = None
@@ -1625,7 +1670,7 @@ class BacktestEngine:
                             sl = self.rm.calc_sl(exec_price, atr, pending)
                             tp = self.rm.calc_tp(exec_price, atr, pending)
                             tier = COIN_TIERS.get(sym, CoinTier.TIER_2)
-                            size = self.rm.calc_size(trend_balance, exec_price, sl, tier)  # 使用趋势资金池
+                            size = self.rm.calc_size(trend_balance, exec_price, sl, tier, pending)  # 使用趋势资金池，按方向加权风险
                             b1 = size * self.cfg.BATCH1_RATIO
                             
                             if b1 > 0 and b1 * (1 + self.cfg.TRADING_FEE) <= trend_balance:
@@ -1725,8 +1770,8 @@ class BacktestEngine:
         
         # 【v5.3修复】计算最终余额：趋势余额 + 网格余额
         final_balance = trend_balance + grid_balance
-        # 【修复】初始资金应该是趋势+网格的总和（2倍init_bal），因为实际用了两倍资金
-        total_init_bal = init_bal * 2  # 趋势1万 + 网格1万 = 2万
+        # 【修复】初始资金使用传入的单一本金（已拆分为两池）
+        total_init_bal = init_bal
         # 【修复】使用最终权益而不是余额计算收益率（权益包含未平仓持仓价值）
         final_equity = self.equity[-1]['equity'] if self.equity else final_balance
         return self._results(total_init_bal, final_equity)
