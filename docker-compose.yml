@@ -1,0 +1,54 @@
+services:
+  bot:
+    build:
+      context: .
+    container_name: my_trading_system_bot
+    restart: unless-stopped
+    environment:
+      # 交易所配置
+      EXCHANGE: ${EXCHANGE:-okx}  # binance 或 okx
+      
+      # 币安API配置（当EXCHANGE=binance时使用）
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY:-}
+      
+      # OKX API配置（当EXCHANGE=okx时使用）
+      OKX_API_KEY: ${OKX_API_KEY:-}
+      OKX_API_SECRET: ${OKX_API_SECRET:-}
+      OKX_PASSPHRASE: ${OKX_PASSPHRASE:-}
+      
+      # Non-interactive mode (required for Docker/cloud deployment)
+      NON_INTERACTIVE: "1"
+      
+      # Trading configuration
+      TRADING_SYMBOL: ${TRADING_SYMBOL:-BTC/USDT:USDT}
+      TRADING_MODE: ${TRADING_MODE:-demo}  # demo, paper, live
+      USE_DEMO_TRADING: ${USE_DEMO_TRADING:-false}  # false=实盘, true=测试网/Demo Trading
+      
+      # Leverage (for swap contracts only): leave empty to use account default
+      LEVERAGE: ${LEVERAGE:-}  # e.g., 1, 3, 5, 10, 20 (optional)
+      
+      # Runtime limit (hours): 0 or negative = unlimited, default 24
+      MAX_RUNTIME_HOURS: ${MAX_RUNTIME_HOURS:-0}  # 0 = unlimited for cloud deployment
+      
+      # For multi-symbol mode (if using multi_symbol_trading.py)
+      TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT}
+      
+      # Optional proxies
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      
+      # Optional timezone
+      TZ: ${TZ:-UTC}
+      
+      # PushPlus notification (optional)
+      PUSHPLUS_WEBHOOK: ${PUSHPLUS_WEBHOOK:-}
+      PUSHPLUS_TOPIC: ${PUSHPLUS_TOPIC:-}  # 群组ID或群组名称（可选）
+    # Persist logs if you want files on host
+    volumes:
+      - ./logs:/app/logs
+      - ./live_trading_v52.log:/app/live_trading_v52.log
+    # Default command: single symbol bot (默认非交互模式)
+    command: ["python", "-u", "live_trading_v52.py"]
+    # For multi-symbol mode, uncomment:
+    # command: ["python", "-u", "multi_symbol_trading.py"]
